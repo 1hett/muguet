@@ -344,6 +344,18 @@ fn vertex_format(dxgi: u32) -> Option<VertexFormat> {
     })
 }
 fn wf(w: u32) -> f32 { f32::from_bits(w) }
+/// Key of a cached SRV view: its dimension, and whether it goes through a proxy texture.
+fn srv_view_key(dim: TextureViewDimension, proxied: bool) -> &'static str {
+    use TextureViewDimension as D;
+    match (dim, proxied) {
+        (D::D1, false) => "D1", (D::D1, true) => "D1:p",
+        (D::D2, false) => "D2", (D::D2, true) => "D2:p",
+        (D::D2Array, false) => "D2Array", (D::D2Array, true) => "D2Array:p",
+        (D::Cube, false) => "Cube", (D::Cube, true) => "Cube:p",
+        (D::CubeArray, false) => "CubeArray", (D::CubeArray, true) => "CubeArray:p",
+        (D::D3, false) => "D3", (D::D3, true) => "D3:p",
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Kind { Uniform, Storage, ReadOnlyStorage, Sampler, SamplerCmp, Texture, StorageTexture }
@@ -2191,8 +2203,9 @@ impl Gpu {
         } else {
             (self.tex(res)?.tex.clone(), tformat)
         };
-        let key = format!("{:?}{}", b.dim, if proxied { ":p" } else { "" });
-        if let Some(v) = self.view_obj(srv_id).and_then(|v| v.views.get(&key)) { return Some(v.clone()); }
+        // a static key: this runs for every texture binding of every draw
+        let key = srv_view_key(b.dim, proxied);
+        if let Some(v) = self.view_obj(srv_id).and_then(|v| v.views.get(key)) { return Some(v.clone()); }
         let total = desc.mips;
         let mip_count = if bb == 0xffff_ffff || bb == 0 { total.saturating_sub(a) } else { bb };
         let layers = desc.d;
@@ -2223,7 +2236,7 @@ impl Gpu {
         }
         let v = self.scoped("SRV view", |_| tex.create_view(&vd))?;
         if !proxied {
-            if let Some(vo) = self.view_obj_mut(srv_id) { vo.views.insert(key, v.clone()); }
+            if let Some(vo) = self.view_obj_mut(srv_id) { vo.views.insert(key.to_string(), v.clone()); }
         }
         Some(v)
     }
