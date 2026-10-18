@@ -96,7 +96,6 @@ struct Fmt {
 static BC_SOFT: AtomicBool = AtomicBool::new(false);
 static BC1_ASTC: AtomicBool = AtomicBool::new(false);
 static F32_HALF: AtomicBool = AtomicBool::new(false);
-/// MUGUET_CLOUD_SHADOWS=0 skips the dedicated cloud-shadow draw (debug).
 static CLOUD_SHADOWS: LazyLock<bool> = LazyLock::new(|| std::env::var("MUGUET_CLOUD_SHADOWS").map_or(true, |v| v != "0"));
 static MEM_STATS: LazyLock<bool> = LazyLock::new(|| std::env::var("MUGUET_MEM_STATS").is_ok_and(|v| v != "0"));
 static RE_VAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"@binding\((\d+)u?\)\s*var(?:<[^>]*>)?\s+(\w+)").unwrap());
@@ -346,7 +345,6 @@ fn vertex_format(dxgi: u32) -> Option<VertexFormat> {
     })
 }
 fn wf(w: u32) -> f32 { f32::from_bits(w) }
-/// Key of a cached SRV view: its dimension, and whether it goes through a proxy texture.
 fn srv_view_key(dim: TextureViewDimension, proxied: bool) -> &'static str {
     use TextureViewDimension as D;
     match (dim, proxied) {
@@ -621,7 +619,6 @@ struct Program {
     variants: RefCell<HashMap<String, Option<ShaderModule>>>,
     label: String,
     uid: u64,
-    /// Same for every load of the same shader, so pipelines can be keyed and saved by content.
     stable: u64,
     hash: String,
     vid: bool,
@@ -753,7 +750,6 @@ struct PipeJob {
 }
 enum PipeEntry { Pending, Done(Option<Rc<Pl>>) }
 
-/// The draw state a pipeline is built from, besides the shaders and pass.
 struct PipeStates { sig: Vec<SigEl>, rs: Option<Rc<StateObj>>, blend: Option<Rc<StateObj>>, dss: Option<Rc<StateObj>> }
 
 const RECIPE_LIMIT: u64 = 32 << 20;
@@ -879,10 +875,8 @@ pub struct Gpu {
     proxy_pipelines: HashMap<&'static str, RenderPipeline>,
     unfilt: HashMap<u64, (u128, u128)>,
     nearest: HashMap<u32, Sampler>,
-    /// The 128x1 ramp `cascadeshadows_rendering::PS_SmoothStep` last rendered, and a view of it.
     ramp_tex: u32,
     ramp_view: Option<(u32, TextureView)>,
-    /// 1x1 white texture: density 1 = clear sky for CloudSampler.
     white_view: Option<TextureView>,
     f2d_pipeline: Option<RenderPipeline>,
     bc1_astc: Option<ComputePipeline>,
@@ -1704,7 +1698,6 @@ impl Gpu {
             }
             _ => return None,
         };
-        // one Program per shader, shared by every object that uses it and by the pipeline warm-up
         let prog = self.warm_program(&hash, stage);
         if let Some(Obj::Shader(s)) = self.obj_mut(id) { s.program = Some(prog.clone()); }
         prog
@@ -1904,7 +1897,6 @@ impl Gpu {
     fn mark_depth_dirty(&mut self, id: u32) {
         self.mark_ds_dirty(id, true, true);
     }
-    /// A pass that can write only depth, or only stencil, still changes that aspect's proxy.
     fn mark_ds_dirty(&mut self, id: u32, depth: bool, stencil: bool) {
         if let Some(t) = self.tex_mut(id) {
             if depth { if let Some(p) = t.proxy_depth.as_mut() { p.dirty = true; } }
@@ -2263,7 +2255,6 @@ impl Gpu {
         } else {
             (self.tex(res)?.tex.clone(), tformat)
         };
-        // a static key: this runs for every texture binding of every draw
         let key = srv_view_key(b.dim, proxied);
         if let Some(v) = self.view_obj(srv_id).and_then(|v| v.views.get(key)) { return Some(v.clone()); }
         let total = desc.mips;
@@ -2427,11 +2418,6 @@ impl Gpu {
         let mut key: Vec<u64> = Vec::with_capacity(bindings.len() * 2 + 3);
         key.extend([bgl.1, prog.uid, stage as u64]);
         let mut dyn_off = None;
-        // The cloud-shadow programs of cascadeshadows_rendering read CloudSampler (t5) and
-        // SmoothStepSampler (t6), but the game never binds either here: the slots keep whatever
-        // the last material and the tiled-lighting depth downsample left in them, so the "cloud
-        // factor" becomes the depth of one screen tile and the ground flashes dark (#42). Give the
-        // draw the ramp it just rendered and a clear-sky (white) cloud texture instead.
         let cloud_fix = stage == 1 && prog.label.starts_with("cascadeshadows_rendering") && (prog.label.contains("CloudShadows") || prog.label.contains("CLOUDS")) && self.ramp_tex != 0 && {
             let id = *self.s.srv[1].get(6).unwrap_or(&0);
             self.view_obj(id).filter(|v| !v.is_buf).and_then(|v| self.tex(v.res)).map(|t| (t.desc.w, t.desc.h)) != Some((128, 1))
@@ -2613,7 +2599,6 @@ impl Gpu {
         match self.pipelines.get(&key) {
             Some(PipeEntry::Done(p)) => return p.clone(),
             Some(PipeEntry::Pending) => {
-                // being compiled (by an earlier draw or the warm-up): wait for it like a new one
                 let start = Instant::now();
                 let deadline = start + self.pipe_wait_left;
                 while !matches!(self.pipelines.get(&key), Some(PipeEntry::Done(_))) {
@@ -2752,7 +2737,6 @@ impl Gpu {
         key
     }
 
-    /// Appends what a new pipeline was built from, so the next launch can build it during loading.
     #[allow(clippy::too_many_arguments)]
     fn record_recipe(&mut self, vs: &Program, ps: Option<&Rc<Program>>, layout: &LayoutObj, strides: &[u32], strip_code: i64, st: &PipeStates, pi: &PassInfo) {
         if !*PIPE_CACHE || vs.hash.is_empty() || ps.is_some_and(|p| p.hash.is_empty()) || self.recipe_bytes > RECIPE_LIMIT { return; }
@@ -2787,8 +2771,6 @@ impl Gpu {
         self.warm_t0 = Some(Instant::now());
     }
 
-    /// Builds saved pipelines while the worker is idle, a few milliseconds at a time,
-    /// without letting them queue ahead of pipelines the game is waiting for.
     fn warm_step(&mut self, budget: Duration) {
         let start = Instant::now();
         while start.elapsed() < budget && self.pipe_pending.len() < 8 {
