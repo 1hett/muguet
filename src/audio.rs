@@ -1,11 +1,5 @@
 // muguet - audio.rs
 // Constantin Clerc (c22dev) - 0.1
-// The game ring buffer holds 48 kHz PCM. Many Bluetooth A2DP outputs (e.g. Sony
-// WH-1000XM series) only run at 44.1 kHz; requiring 48 kHz unconditionally makes
-// cpal fail with "Sample rate 48000 Hz is not supported" and the game ends up
-// with no sound at all. Try 48 kHz first, then fall back to the device's native
-// rate and linearly resample 48 kHz -> device rate.
-
 
 use crate::RT;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -58,8 +52,8 @@ fn play(ring: u64, capacity: u32) -> anyhow::Result<cpal::Stream> {
 
     let mut last_err: Option<anyhow::Error> = None;
     for rate in rates {
-        let ratio = 48_000.0f64 / rate as f64; // ring frames consumed per output frame
-        let mut abs = 0.0f64;                  // absolute fractional read pos in ring counter space
+        let ratio = 48_000.0f64 / rate as f64;
+        let mut abs = 0.0f64;
         let mut init = false;
         let cfg = cpal::StreamConfig { channels: 2, sample_rate: rate, buffer_size: cpal::BufferSize::Default };
         match device.build_output_stream(cfg, move |out: &mut [f32], _| {
@@ -87,14 +81,13 @@ fn play(ring: u64, capacity: u32) -> anyhow::Result<cpal::Stream> {
                 return;
             }
 
-            // resampling path: linear interpolation over the 48 kHz ring
-            if !init || read.wrapping_sub(abs as u32) as usize > avail.max(1) { abs = read as f64; init = true; } // (re)sync
+            if !init || read.wrapping_sub(abs as u32) as usize > avail.max(1) { abs = read as f64; init = true; }
             let mut produced = 0usize;
             for i in 0..frames {
                 let s = abs + i as f64 * ratio;
-                let i0 = s as u32; // floor in ring counter space (wraps with the counters)
+                let i0 = s as u32;
                 let rel = i0.wrapping_sub(read) as usize;
-                if rel + 1 >= avail { break; } // need i0 and i0+1
+                if rel + 1 >= avail { break; }
                 let t = (s - i0 as f64) as f32;
                 unsafe {
                     let pa = (data_at(base, ring) as *const f32).add(((i0 & mask) * 2) as usize);
@@ -108,7 +101,7 @@ fn play(ring: u64, capacity: u32) -> anyhow::Result<cpal::Stream> {
             UNDERRUN_FRAMES.fetch_add(((frames - produced) as f64 * ratio) as u64, Ordering::Relaxed);
             CALLBACKS.fetch_add(1, Ordering::Relaxed);
             abs += produced as f64 * ratio;
-            if abs >= 4_294_967_296.0 { abs -= 4_294_967_296.0; } // keep inside u32 counter space
+            if abs >= 4_294_967_296.0 { abs -= 4_294_967_296.0; }
             hdr(1).store(abs as u32 as i32, Ordering::SeqCst);
             hdr(3).fetch_add(1, Ordering::Relaxed);
         }, |e| eprintln!("[audio] stream error: {e}"), None) {
