@@ -1,0 +1,57 @@
+name: Build Muguet IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      game_wasm_url:
+        description: "URL to game.wasm"
+        required: true
+        default: "https://github.com/bytarch/gta5mobile-android/releases/download/engine-src/game.wasm"
+      bundle_id:
+        description: "Bundle ID for IPA"
+        required: true
+        default: "ch.cclerc.muguet.ios"
+
+jobs:
+  build:
+    name: Build Muguet iOS IPA
+    runs-on: macos-14
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Select Xcode Version
+        run: |
+          sudo xcode-select -s /Applications/Xcode_15.4.app || sudo xcode-select -s /Applications/Xcode.app
+          xcodebuild -version
+
+      - name: Install System Dependencies
+        run: |
+          brew install xcodegen binaryen
+
+      - name: Install Rust Toolchain
+        run: |
+          rustup toolchain install 1.98.1
+          rustup default 1.98.1
+          rustup target add aarch64-apple-ios --toolchain 1.98.1
+
+      - name: Download game.wasm
+        run: |
+          echo "Downloading game.wasm..."
+          curl -fL "${{ github.event.inputs.game_wasm_url }}" -o game.wasm
+          ls -lh game.wasm
+
+      - name: Build Muguet IPA
+        run: |
+          chmod +x make-ios.sh
+          BUNDLE_ID="${{ github.event.inputs.bundle_id }}" ./make-ios.sh game.wasm --ipa
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Muguet.ipa
+          path: build/Muguet.ipa
+          if-no-files-found: error
+          retention-days: 14
